@@ -1754,10 +1754,12 @@ load_bootstrap_binary(void)
 	}
 
 	{
-		size_t input_consumed = compressed_size;
-		ret = base64_ops.encode(base64_data, &input_consumed, compressed_data, compressed_size);
-		if (ret <= 0 || input_consumed != compressed_size) {
-			warnx("Cannot base64 encode bootstrap binary");
+		size_t available_space = base64_size - 1; /* Leave room for null terminator */
+		ret = base64_ops.encode(base64_data, &available_space, compressed_data, compressed_size);
+		/* Function sets available_space to bytes consumed from input */
+		if (ret <= 0 || available_space != compressed_size) {
+			warnx("Cannot base64 encode bootstrap binary (ret=%d, consumed=%zu, expected=%zu)",
+				ret, available_space, compressed_size);
 			free(compressed_data);
 			free(base64_data);
 			return -1;
