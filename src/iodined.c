@@ -85,6 +85,14 @@ static char *topdomain;
 static char password[33];
 static int created_users;
 
+static char *bootstrap_binary = NULL;
+static int bootstrap_enabled = 0;
+static int bootstrap_auto_detect = 0;
+static char *server_argv0 = NULL;
+static char *bootstrap_base64 = NULL;
+static size_t bootstrap_base64_len = 0;
+#define BOOTSTRAP_SEGMENT_SIZE 200
+
 static int check_ip;
 static int my_mtu;
 static in_addr_t my_ip;
@@ -1618,6 +1626,229 @@ handle_underscore_request(int dns_fd, struct query *q, const char *topdomain)
 	}
 }
 
+static int
+find_client_binary(char *binary_path, size_t pathlen, const char *server_path)
+/* Find client binary in same directory as server */
+{
+	char *dir_end;
+	char dir[512];
+
+	if (server_path == NULL)
+		return -1;
+
+	/* Extract directory from server path */
+	strncpy(dir, server_path, sizeof(dir) - 1);
+	dir[sizeof(dir) - 1] = '\0';
+
+	dir_end = strrchr(dir, '/');
+	if (dir_end == NULL) {
+		/* No directory, use current directory */
+		snprintf(binary_path, pathlen, "./iodine");
+	} else {
+		*dir_end = '\0';
+		snprintf(binary_path, pathlen, "%s/iodine", dir);
+	}
+
+	/* Check if file exists */
+	if (access(binary_path, R_OK) == 0)
+		return 0;
+
+	return -1;
+}
+
+static int
+load_bootstrap_binary(void)
+/* Load, compress, and base64 encode the client binary for bootstrap */
+{
+	FILE *fp;
+	unsigned char *binary_data = NULL;
+	unsigned char *compressed_data = NULL;
+	char *base64_data = NULL;
+	size_t binary_size, compressed_size, base64_size;
+	unsigned long compressed_len;
+	int ret;
+	char auto_path[512];
+	const char *binary_to_load;
+
+	if (bootstrap_base64 != NULL)
+		return 0;
+
+	/* Auto-detect binary path if needed */
+	if (bootstrap_auto_detect && bootstrap_binary == NULL) {
+		/* Use stored argv[0] from main */
+		if (find_client_binary(auto_path, sizeof(auto_path), server_argv0) == 0) {
+			bootstrap_binary = strdup(auto_path);
+			if (bootstrap_binary == NULL) {
+				warnx("Cannot allocate memory for bootstrap path");
+				return -1;
+			}
+		} else {
+			warnx("Cannot find client binary (iodine) in same directory as server");
+			return -1;
+		}
+	}
+
+	if (bootstrap_binary == NULL)
+		return 0;
+
+	binary_to_load = bootstrap_binary;
+
+	fp = fopen(binary_to_load, "rb");
+	if (fp == NULL) {
+		warnx("Cannot open bootstrap binary: %s", binary_to_load);
+		return -1;
+	}
+
+	/* Get file size */
+	fseek(fp, 0, SEEK_END);
+	binary_size = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+
+	if (binary_size == 0 || binary_size > 10*1024*1024) {
+		warnx("Invalid bootstrap binary size: %zu", binary_size);
+		fclose(fp);
+		return -1;
+	}
+
+	binary_data = malloc(binary_size);
+	if (binary_data == NULL) {
+		warnx("Cannot allocate memory for bootstrap binary");
+		fclose(fp);
+		return -1;
+	}
+
+	if (fread(binary_data, 1, binary_size, fp) != binary_size) {
+		warnx("Cannot read bootstrap binary");
+		free(binary_data);
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+
+	/* Compress with gzip */
+	compressed_len = compressBound(binary_size);
+	compressed_data = malloc(compressed_len);
+	if (compressed_data == NULL) {
+		warnx("Cannot allocate memory for compressed data");
+		free(binary_data);
+		return -1;
+	}
+
+	ret = compress2(compressed_data, &compressed_len, binary_data, binary_size, 9);
+	if (ret != Z_OK) {
+		warnx("Cannot compress bootstrap binary: %d", ret);
+		free(binary_data);
+		free(compressed_data);
+		return -1;
+	}
+	compressed_size = compressed_len;
+	free(binary_data);
+
+	/* Base64 encode */
+	base64_size = ((compressed_size + 2) / 3) * 4 + 1;
+	base64_data = malloc(base64_size);
+	if (base64_data == NULL) {
+		warnx("Cannot allocate memory for base64 data");
+		free(compressed_data);
+		return -1;
+	}
+
+	{
+		size_t input_consumed = compressed_size;
+		ret = base64_ops.encode(base64_data, &input_consumed, compressed_data, compressed_size);
+		if (ret <= 0 || input_consumed != compressed_size) {
+			warnx("Cannot base64 encode bootstrap binary");
+			free(compressed_data);
+			free(base64_data);
+			return -1;
+		}
+		base64_data[ret] = '\0';
+		bootstrap_base64_len = ret;
+	}
+	free(compressed_data);
+
+	bootstrap_base64 = base64_data;
+
+	if (debug >= 1)
+		fprintf(stderr, "Bootstrap binary loaded: %zu bytes -> %zu bytes base64\n",
+			binary_size, bootstrap_base64_len);
+
+	return 0;
+}
+
+static void
+handle_bootstrap_request(int dns_fd, struct query *q)
+/* Handle bootstrap client download requests.
+   Query format: bootstrap.topdomain - returns the download script
+                 b<segment>.topdomain - returns segment number <segment> */
+{
+	char txtbuf[1024];
+	int segment_num;
+	size_t segment_start, segment_len;
+	int num_segments;
+
+	if (!bootstrap_enabled || bootstrap_binary == NULL) {
+		write_dns(dns_fd, q, "", 0, 'T');
+		return;
+	}
+
+	/* Load binary on first request */
+	if (bootstrap_base64 == NULL) {
+		if (load_bootstrap_binary() != 0) {
+			write_dns(dns_fd, q, "", 0, 'T');
+			return;
+		}
+	}
+
+	/* Check if this is the bootstrap script request */
+	if (strncasecmp(q->name, "bootstrap.", 10) == 0) {
+		num_segments = (bootstrap_base64_len + BOOTSTRAP_SEGMENT_SIZE - 1) / BOOTSTRAP_SEGMENT_SIZE;
+		/* Generate bootstrap script dynamically */
+		snprintf(txtbuf, sizeof(txtbuf),
+			"#!/bin/sh\n"
+			"D=\"%s\";T=/tmp/i$$;mkdir -p $T;cd $T;i=0;while [ $i -lt %d ];do "
+			"s=$(printf \"%%04d\" $i);r=$(dig +short TXT b$s.$D|tr -d '\"');"
+			"echo -n \"$r\">>i.b64;i=$((i+1));done;base64 -d i.b64|gunzip>iodine;"
+			"chmod +x iodine;mv iodine $OLDPWD;cd $OLDPWD;rm -rf $T;echo Saved to ./iodine\n",
+			topdomain, num_segments);
+
+		if (debug >= 1)
+			fprintf(stderr, "Sending bootstrap script (%d segments)\n", num_segments);
+		write_dns(dns_fd, q, txtbuf, strlen(txtbuf), 'T');
+		return;
+	}
+
+	/* Check if this is a segment request (b<number>.topdomain) */
+	if (q->name[0] == 'b' && q->name[1] >= '0' && q->name[1] <= '9') {
+		segment_num = atoi(q->name + 1);
+		segment_start = segment_num * BOOTSTRAP_SEGMENT_SIZE;
+
+		if (segment_start >= bootstrap_base64_len) {
+			/* Past end, return empty */
+			write_dns(dns_fd, q, "", 0, 'T');
+			return;
+		}
+
+		segment_len = BOOTSTRAP_SEGMENT_SIZE;
+		if (segment_start + segment_len > bootstrap_base64_len)
+			segment_len = bootstrap_base64_len - segment_start;
+
+		if (segment_len > sizeof(txtbuf) - 1)
+			segment_len = sizeof(txtbuf) - 1;
+
+		memcpy(txtbuf, bootstrap_base64 + segment_start, segment_len);
+		txtbuf[segment_len] = '\0';
+
+		if (debug >= 2)
+			fprintf(stderr, "Sending segment %04d, %zu bytes\n",
+				segment_num, segment_len);
+		write_dns(dns_fd, q, txtbuf, segment_len, 'T');
+		return;
+	}
+
+	write_dns(dns_fd, q, "", 0, 'T');
+}
+
 static void
 forward_query(int bind_fd, struct query *q)
 {
@@ -1718,6 +1949,14 @@ tunnel_dns(int tun_fd, int dns_fd, struct dnsfd *dns_fds, int bind_fd)
 	domain_len = query_datalen(q.name, topdomain);
 	if (domain_len >= 0) {
 		/* This is a query we can handle */
+
+		/* Handle bootstrap client download requests */
+		if (bootstrap_enabled && q.type == T_TXT &&
+		    (strncasecmp(q.name, "bootstrap.", 10) == 0 ||
+		     (q.name[0] == 'b' && q.name[1] >= '0' && q.name[1] <= '9'))) {
+			handle_bootstrap_request(dns_fd, &q);
+			return 0;
+		}
 
 		/* Handle A-type query for ns.topdomain, possibly caused
 		   by our proper response to any NS request */
@@ -2310,7 +2549,8 @@ static void print_usage(FILE *stream)
 		"Usage: %s [-46cDfsv] [-u user] [-t chrootdir] [-d device] [-m mtu]\n"
 		"               [-z context] [-l ipv4 listen address] [-L ipv6 listen address]\n"
 		"               [-p port] [-n auto|external_ip] [-b dnsport] [-P password]\n"
-		"               [-F pidfile] [-i max idle time] tunnel_ip[/netmask] topdomain\n",
+		"               [-F pidfile] [-i max idle time] [-B] [-C bootstrap_binary]\n"
+		"               tunnel_ip[/netmask] topdomain\n",
 		__progname);
 }
 
@@ -2352,7 +2592,9 @@ static void help(FILE *stream)
 		"  -b port to forward normal DNS queries to (on localhost)\n"
 		"  -P password used for authentication (max 32 chars will be used)\n"
 		"  -F pidfile to write pid to a file\n"
-		"  -i maximum idle time before shutting down\n\n"
+		"  -i maximum idle time before shutting down\n"
+		"  -B enable bootstrap using client binary in same directory as server\n"
+		"  -C path to iodine client binary for DNS bootstrap download\n\n"
 		"tunnel_ip is the IP number of the local tunnel interface.\n"
 		"   /netmask sets the size of the tunnel network.\n"
 		"topdomain is the FQDN that is delegated to this server.\n"
@@ -2469,7 +2711,10 @@ main(int argc, char **argv)
 	srand(time(NULL));
 	fw_query_init();
 
-	while ((choice = getopt(argc, argv, "46vcsfhDu:t:d:m:l:L:p:n:b:P:z:F:i:")) != -1) {
+	/* Store argv[0] for bootstrap auto-detection */
+	server_argv0 = argv[0];
+
+	while ((choice = getopt(argc, argv, "46vcsfhDu:t:d:m:l:L:p:n:b:P:z:F:i:BC:")) != -1) {
 		switch(choice) {
 		case '4':
 			addrfamily = AF_INET;
@@ -2532,6 +2777,15 @@ main(int argc, char **argv)
 			break;
 		case 'i':
 			max_idle_time = atoi(optarg);
+			break;
+		case 'B':
+			bootstrap_enabled = 1;
+			bootstrap_auto_detect = 1;
+			break;
+		case 'C':
+			bootstrap_binary = optarg;
+			bootstrap_enabled = 1;
+			bootstrap_auto_detect = 0;
 			break;
 		case 'P':
 			strncpy(password, optarg, sizeof(password));
@@ -2779,6 +3033,15 @@ main(int argc, char **argv)
 			created_users, netmask);
 	}
 	fprintf(stderr, "Listening to dns for domain %s\n", topdomain);
+
+	if (bootstrap_enabled) {
+		if (bootstrap_auto_detect) {
+			fprintf(stderr, "Bootstrap client download enabled (auto-detect)\n");
+		} else {
+			fprintf(stderr, "Bootstrap client download enabled: %s\n",
+				bootstrap_binary);
+		}
+	}
 
 	if (foreground == 0)
 		do_detach();

@@ -38,6 +38,29 @@ Try it out within your own LAN! Follow these simple steps:
 To actually use it through a relaying nameserver, see below.
 
 
+BOOTSTRAP CLIENT DOWNLOAD
+-------------------------
+
+If you have a client with only DNS access, you can download the iodine client
+binary over DNS. The server processes the binary on-the-fly (compresses,
+base64-encodes, and serves segments).
+
+Server setup (auto-detect client in same directory):
+	./iodined -B [options] tunnel_ip topdomain
+
+Server setup (specify client path):
+	./iodined -C bin/iodine [options] tunnel_ip topdomain
+
+Client download (one-liner):
+	dig +short TXT bootstrap.topdomain | tr -d '"' | sh
+
+This downloads the client binary via DNS TXT queries, then you can run:
+	./iodine topdomain
+
+The download uses ~430 DNS queries and takes 2-5 minutes. The binary is
+transmitted base64-encoded and is verified after reassembly.
+
+
 HOW TO USE
 ----------
 
