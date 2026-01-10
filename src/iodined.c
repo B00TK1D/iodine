@@ -1788,14 +1788,14 @@ handle_bootstrap_request(int dns_fd, struct query *q)
 	int num_segments;
 
 	if (!bootstrap_enabled || bootstrap_binary == NULL) {
-		write_dns(dns_fd, q, "", 0, 'T');
+		write_dns(dns_fd, q, "", 0, 'R');
 		return;
 	}
 
 	/* Load binary on first request */
 	if (bootstrap_base64 == NULL) {
 		if (load_bootstrap_binary() != 0) {
-			write_dns(dns_fd, q, "", 0, 'T');
+			write_dns(dns_fd, q, "", 0, 'R');
 			return;
 		}
 	}
@@ -1814,7 +1814,14 @@ handle_bootstrap_request(int dns_fd, struct query *q)
 
 		if (debug >= 1)
 			fprintf(stderr, "Sending bootstrap script (%d segments)\n", num_segments);
-		write_dns(dns_fd, q, txtbuf, strlen(txtbuf), 'T');
+		/* Send raw TXT without encoding prefix */
+		{
+			char dnsbuf[64*1024];
+			int dnslen = dns_encode(dnsbuf, sizeof(dnsbuf), q, QR_ANSWER, txtbuf, strlen(txtbuf));
+			if (dnslen > 0) {
+				sendto(dns_fd, dnsbuf, dnslen, 0, (struct sockaddr*)&q->from, q->fromlen);
+			}
+		}
 		return;
 	}
 
@@ -1825,7 +1832,7 @@ handle_bootstrap_request(int dns_fd, struct query *q)
 
 		if (segment_start >= bootstrap_base64_len) {
 			/* Past end, return empty */
-			write_dns(dns_fd, q, "", 0, 'T');
+			write_dns(dns_fd, q, "", 0, 'R');
 			return;
 		}
 
@@ -1842,11 +1849,18 @@ handle_bootstrap_request(int dns_fd, struct query *q)
 		if (debug >= 2)
 			fprintf(stderr, "Sending segment %04d, %zu bytes\n",
 				segment_num, segment_len);
-		write_dns(dns_fd, q, txtbuf, segment_len, 'T');
+		/* Send raw TXT without encoding prefix */
+		{
+			char dnsbuf[64*1024];
+			int dnslen = dns_encode(dnsbuf, sizeof(dnsbuf), q, QR_ANSWER, txtbuf, segment_len);
+			if (dnslen > 0) {
+				sendto(dns_fd, dnsbuf, dnslen, 0, (struct sockaddr*)&q->from, q->fromlen);
+			}
+		}
 		return;
 	}
 
-	write_dns(dns_fd, q, "", 0, 'T');
+	write_dns(dns_fd, q, "", 0, 'R');
 }
 
 static void
