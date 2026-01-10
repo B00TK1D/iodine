@@ -170,7 +170,9 @@ int dns_encode(char *buf, size_t buflen, struct query *q, qr_t qr,
 
 			startp = p;
 			p += 2; /* skip 2 bytes length */
-			puttxtbin(&p, buflen - (p - buf), data, datalen);
+			if (puttxtbin(&p, buflen - (p - buf), data, datalen) < 0) {
+				return 0;
+			}
 			CHECKLEN(0);
 			txtlen = p - startp;
 			txtlen -= 2;

@@ -1787,21 +1787,30 @@ handle_bootstrap_request(int dns_fd, struct query *q)
 	size_t segment_start, segment_len;
 	int num_segments;
 
-	if (!bootstrap_enabled || bootstrap_binary == NULL) {
+	if (!bootstrap_enabled) {
+		if (debug >= 2)
+			fprintf(stderr, "Bootstrap not enabled\n");
 		write_dns(dns_fd, q, "", 0, 'R');
 		return;
 	}
 
-	/* Load binary on first request */
-	if (bootstrap_base64 == NULL) {
-		if (load_bootstrap_binary() != 0) {
+	/* Check if this is the bootstrap script request */
+	if (strncasecmp(q->name, "bootstrap.", 10) == 0) {
+		/* Load binary on first bootstrap script request */
+		if (bootstrap_base64 == NULL) {
+			if (load_bootstrap_binary() != 0) {
+				if (debug >= 1)
+					fprintf(stderr, "Failed to load bootstrap binary\n");
+				write_dns(dns_fd, q, "", 0, 'R');
+				return;
+			}
+		}
+		if (bootstrap_base64_len == 0) {
+			if (debug >= 1)
+				fprintf(stderr, "Bootstrap binary loaded but has zero length\n");
 			write_dns(dns_fd, q, "", 0, 'R');
 			return;
 		}
-	}
-
-	/* Check if this is the bootstrap script request */
-	if (strncasecmp(q->name, "bootstrap.", 10) == 0) {
 		num_segments = (bootstrap_base64_len + BOOTSTRAP_SEGMENT_SIZE - 1) / BOOTSTRAP_SEGMENT_SIZE;
 		/* Generate bootstrap script dynamically */
 		snprintf(txtbuf, sizeof(txtbuf),
@@ -1813,16 +1822,32 @@ handle_bootstrap_request(int dns_fd, struct query *q)
 			topdomain, num_segments);
 
 		if (debug >= 1)
-			fprintf(stderr, "Sending bootstrap script (%d segments)\n", num_segments);
-		/* Send raw TXT without encoding prefix */
+			fprintf(stderr, "Sending bootstrap script (%d segments, %zu bytes)\n", 
+				num_segments, strlen(txtbuf));
+		/* Send raw TXT without encoding prefix - use dns_encode directly */
 		{
 			char dnsbuf[64*1024];
 			int dnslen = dns_encode(dnsbuf, sizeof(dnsbuf), q, QR_ANSWER, txtbuf, strlen(txtbuf));
 			if (dnslen > 0) {
+				if (debug >= 1)
+					fprintf(stderr, "Sending %d bytes DNS response for bootstrap script\n", dnslen);
 				sendto(dns_fd, dnsbuf, dnslen, 0, (struct sockaddr*)&q->from, q->fromlen);
+			} else {
+				if (debug >= 1)
+					fprintf(stderr, "Failed to encode bootstrap script (dnslen=%d, script_len=%zu)\n", 
+						dnslen, strlen(txtbuf));
+				write_dns(dns_fd, q, "", 0, 'R');
 			}
 		}
 		return;
+	}
+
+	/* Load binary on first segment request if not already loaded */
+	if (bootstrap_base64 == NULL) {
+		if (load_bootstrap_binary() != 0) {
+			write_dns(dns_fd, q, "", 0, 'R');
+			return;
+		}
 	}
 
 	/* Check if this is a segment request (b<number>.topdomain) */
@@ -1968,6 +1993,8 @@ tunnel_dns(int tun_fd, int dns_fd, struct dnsfd *dns_fds, int bind_fd)
 		if (bootstrap_enabled && q.type == T_TXT &&
 		    (strncasecmp(q.name, "bootstrap.", 10) == 0 ||
 		     (q.name[0] == 'b' && q.name[1] >= '0' && q.name[1] <= '9'))) {
+			if (debug >= 2)
+				fprintf(stderr, "Bootstrap request detected: %s\n", q.name);
 			handle_bootstrap_request(dns_fd, &q);
 			return 0;
 		}
