@@ -1817,13 +1817,13 @@ handle_bootstrap_request(int dns_fd, struct query *q)
 		/* Generate bootstrap script dynamically */
 		snprintf(txtbuf, sizeof(txtbuf),
 			"D=\"%s\";O=\"$PWD\";T=/tmp/i$$;mkdir -p \"$T\"&&cd \"$T\"&&i=0;while [ $i -lt %d ];do "
-			"s=$(printf \"%%04d\" $i);r=$(dig +short TXT \"b$s.$D\"|tr -d '\"');"
-			"echo -n \"$r\">>i.b64;i=$((i+1));done&&base64 -d i.b64|gunzip>iodine&&"
-			"chmod +x iodine&&mv iodine \"$O\"&&cd \"$O\"&&rm -rf \"$T\"&&echo Saved to ./iodine\n",
+			"s=$(printf \"%%04d\" $i);dig +short TXT \"b$s.$D\" 2>/dev/null|sed 's/\"//g'>>i.b64;"
+			"i=$((i+1));done&&base64 -d i.b64 2>/dev/null|gunzip>iodine 2>/dev/null&&"
+			"chmod +x iodine&&mv iodine \"$O/\"&&cd \"$O\"&&rm -rf \"$T\"&&echo Saved to ./iodine\n",
 			topdomain, num_segments);
 
 		if (debug >= 1)
-			fprintf(stderr, "Sending bootstrap script (%d segments, %zu bytes)\n", 
+			fprintf(stderr, "Sending bootstrap script (%d segments, %zu bytes)\n",
 				num_segments, strlen(txtbuf));
 		/* Send raw TXT without encoding prefix - use dns_encode directly */
 		{
@@ -1835,7 +1835,7 @@ handle_bootstrap_request(int dns_fd, struct query *q)
 				sendto(dns_fd, dnsbuf, dnslen, 0, (struct sockaddr*)&q->from, q->fromlen);
 			} else {
 				if (debug >= 1)
-					fprintf(stderr, "Failed to encode bootstrap script (dnslen=%d, script_len=%zu)\n", 
+					fprintf(stderr, "Failed to encode bootstrap script (dnslen=%d, script_len=%zu)\n",
 						dnslen, strlen(txtbuf));
 				write_dns(dns_fd, q, "", 0, 'R');
 			}
