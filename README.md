@@ -52,7 +52,7 @@ Server setup (specify client path):
 	./iodined -C bin/iodine [options] tunnel_ip topdomain
 
 Client download (one-liner):
-	dig +short TXT bootstrap.topdomain | tr -d '"' | sh
+	s=$(dig +short TXT bootstrap.topdomain);sh -c "${s:1:-1}"
 
 This downloads the client binary via DNS TXT queries, then you can run:
 	./iodine topdomain
