@@ -1816,10 +1816,10 @@ handle_bootstrap_request(int dns_fd, struct query *q)
 		num_segments = (bootstrap_base64_len + BOOTSTRAP_SEGMENT_SIZE - 1) / BOOTSTRAP_SEGMENT_SIZE;
 		/* Generate bootstrap script dynamically */
 		snprintf(txtbuf, sizeof(txtbuf),
-			"D=\"%s\";O=\"$PWD\";T=/tmp/i$$;mkdir -p \"$T\"&&cd \"$T\"&&i=0;while [ $i -lt %d ];do "
-			"dig +short TXT \"b$(printf %%04d $i).$D\" 2>/dev/null|tr -d '\"'>>i.b64;"
+			"D=%s;T=/tmp/i$$;mkdir -p $T&&cd $T&&i=0;while [ $i -lt %d ];do "
+			"dig +short TXT b$(printf %%04d $i).$D 2>/dev/null|tr -d '\"'>>i.b64;"
 			"i=$((i+1));done&&base64 -d i.b64 2>/dev/null|gunzip>iodine 2>/dev/null&&"
-			"chmod +x iodine&&mv iodine \"$O/\"&&cd \"$O\"&&rm -rf \"$T\"&&echo Saved to ./iodine\n",
+			"chmod +x iodine&&mv iodine .&&cd ..&&rm -rf $T\n",
 			topdomain, num_segments);
 
 		if (debug >= 1)
